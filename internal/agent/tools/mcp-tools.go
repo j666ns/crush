@@ -3,15 +3,21 @@ package tools
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
 )
 
+var whitelistCrushDockerTools = []string{
+	"mcp_crush_docker_mcp-find",
+	"mcp_crush_docker_mcp-add",
+	"mcp_crush_docker_mcp-remove",
+}
+
 // GetMCPTools gets all the currently available MCP tools.
-func GetMCPTools(permissions permission.Service, cfg *config.Config, wd string) []*Tool {
+func GetMCPTools(permissions permission.Service, wd string) []*Tool {
 	var result []*Tool
 	for mcpName, tools := range mcp.Tools() {
 		for _, tool := range tools {
@@ -20,7 +26,6 @@ func GetMCPTools(permissions permission.Service, cfg *config.Config, wd string) 
 				tool:        tool,
 				permissions: permissions,
 				workingDir:  wd,
-				cfg:         cfg,
 			})
 		}
 	}
@@ -31,7 +36,6 @@ func GetMCPTools(permissions permission.Service, cfg *config.Config, wd string) 
 type Tool struct {
 	mcpName         string
 	tool            *mcp.Tool
-	cfg             *config.Config
 	permissions     permission.Service
 	workingDir      string
 	providerOptions fantasy.ProviderOptions
@@ -91,46 +95,27 @@ func (m *Tool) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolRe
 	if sessionID == "" {
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for creating a new file")
 	}
-	permissionDescription := fmt.Sprintf("execute %s with the following parameters:", m.Info().Name)
-	p, err := m.permissions.Request(ctx,
-		permission.CreatePermissionRequest{
-			SessionID:   sessionID,
-			ToolCallID:  params.ID,
-			Path:        m.workingDir,
-			ToolName:    m.Info().Name,
-			Action:      "execute",
-			Description: permissionDescription,
-			Params:      params.Input,
-		},
-	)
-	if err != nil {
-		return fantasy.ToolResponse{}, err
-	}
-	if !p {
-		return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
+	if !slices.Contains(whitelistCrushDockerTools, params.Name) {
+		permissionDescription := fmt.Sprintf("execute %s with the following parameters:", m.Info().Name)
+		p := m.permissions.Request(
+			permission.CreatePermissionRequest{
+				SessionID:   sessionID,
+				ToolCallID:  params.ID,
+				Path:        m.workingDir,
+				ToolName:    m.Info().Name,
+				Action:      "execute",
+				Description: permissionDescription,
+				Params:      params.Input,
+			},
+		)
+		if !p {
+			return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
+		}
 	}
 
-	result, err := mcp.RunTool(ctx, m.cfg, m.mcpName, m.tool.Name, params.Input)
+	content, err := mcp.RunTool(ctx, m.mcpName, m.tool.Name, params.Input)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
-
-	switch result.Type {
-	case "image", "media":
-		if !GetSupportsImagesFromContext(ctx) {
-			modelName := GetModelNameFromContext(ctx)
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
-		}
-
-		var response fantasy.ToolResponse
-		if result.Type == "image" {
-			response = fantasy.NewImageResponse(result.Data, result.MediaType)
-		} else {
-			response = fantasy.NewMediaResponse(result.Data, result.MediaType)
-		}
-		response.Content = result.Content
-		return response, nil
-	default:
-		return fantasy.NewTextResponse(result.Content), nil
-	}
+	return fantasy.NewTextResponse(content), nil
 }
